@@ -35,14 +35,33 @@ class AwsS3 extends AbstractAdapter
         return $this->client->doesObjectExist($this->bucket, $this->prefix($path));
     }
 
-    public function write($path, $contents, $visibility)
+    public function write($path, $contents, $visibility = null)
     {
         $options = $this->getOptions($path, array(
             'Body' => $contents,
             'ContentType' => Util::contentMimetype($contents),
             'ContentLength' => Util::contentSize($contents),
-            'ACL' => $visibility === AdapterInterface::VISIBILITY_PUBLIC ? 'public-read' : 'private',
         ));
+
+        if ($visibility) {
+            $options['ACL'] = $visibility === AdapterInterface::VISIBILITY_PUBLIC ? 'public-read' : 'private';
+        }
+
+        $this->client->putObject($options);
+        $options['visibility'] = $visibility;
+
+        return $this->normalizeObject($options);
+    }
+
+    public function writeStream($path, $resource, $visibility = null)
+    {
+        $options = $this->getOptions($path, array(
+            'Body' => $resource,
+        ));
+
+        if ($visibility) {
+            $options['ACL'] = $visibility === AdapterInterface::VISIBILITY_PUBLIC ? 'public-read' : 'private';
+        }
 
         $this->client->putObject($options);
         $options['visibility'] = $visibility;
@@ -55,12 +74,32 @@ class AwsS3 extends AbstractAdapter
         return $this->write($path, $contents);
     }
 
+    public function updateStream($path, $resource)
+    {
+        return $this->write($path, $resource);
+    }
+
     public function read($path)
     {
         $options = $this->getOptions($path);
         $result = $this->client->getObject($options);
 
         return $this->normalizeObject($result->getAll());
+    }
+
+    public function readStream($path)
+    {
+        if ( ! in_array('s3', stream_get_wrappers())) {
+            $this->client->registerStreamWrapper();
+        }
+
+        $context = stream_context_create(array(
+            's3' => array('seekable' => true),
+        ));
+
+        $stream = fopen('s3://'.$this->bucket.'/'.$this->prefix($path), 'r', false, $context);
+
+        return compact('stream');
     }
 
     public function rename($path, $newpath)
@@ -86,12 +125,12 @@ class AwsS3 extends AbstractAdapter
 
     public function deleteDir($path)
     {
-        $this->client->deleteMatchingObjects($this->bucket, $this->prefix($path));
+        return $this->client->deleteMatchingObjects($this->bucket, $this->prefix($path));
     }
 
     public function createDir($path)
     {
-        return array('path' => $path, 'type' => $dir);
+        return array('path' => $path, 'type' => 'dir');
     }
 
     public function getMetadata($path)
@@ -123,16 +162,12 @@ class AwsS3 extends AbstractAdapter
         $result = $this->client->getObjectAcl($options)->getAll();
 
         foreach ($result['Grants'] as $grant) {
-            if (isset($grant['Grantee']['URI']) and $grant['Grantee']['URI'] === Group::ALL_USERS) {
-                if ($grant['Permission'] !== Permission::READ) {
-                    break;
-                }
-
-                return ['visibility' => AdapterInterface::VISIBILITY_PUBLIC];
+            if (isset($grant['Grantee']['URI']) and $grant['Grantee']['URI'] === Group::ALL_USERS and $grant['Permission'] === Permission::READ) {
+                return array('visibility' => AdapterInterface::VISIBILITY_PUBLIC);
             }
         }
 
-        return ['visibility' => AdapterInterface::VISIBILITY_PRIVATE];
+        return array('visibility' => AdapterInterface::VISIBILITY_PRIVATE);
     }
 
     public function setVisibility($path, $visibility)
@@ -146,15 +181,11 @@ class AwsS3 extends AbstractAdapter
         return compact('visibility');
     }
 
-    public function listContents()
+    public function listContents($dirname = '', $recursive = false)
     {
         $result = $this->client->listObjects(array(
             'Bucket' => $this->bucket,
-        ))->getAll(['Contents']);
-
-        if ( ! isset($result['Contents'])) {
-            return array();
-        }
+        ))->getAll(array('Contents'));
 
         $result = array_map(array($this, 'normalizeObject'), $result['Contents']);
 
@@ -169,7 +200,7 @@ class AwsS3 extends AbstractAdapter
             $result['timestamp'] = strtotime($object['LastModified']);
         }
 
-        $result = array_merge($result, Util::map($object, static::$resultMap), ['type' => 'file']);
+        $result = array_merge($result, Util::map($object, static::$resultMap), array('type' => 'file'));
 
         return $result;
     }

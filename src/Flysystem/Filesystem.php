@@ -2,9 +2,10 @@
 
 namespace Flysystem;
 
+use LogicException;
 use InvalidArgumentException;
 
-class Filesystem implements AdapterInterface
+class Filesystem implements FilesystemInterface
 {
     /**
      * @var  AdapterInterface  $adapter
@@ -22,10 +23,16 @@ class Filesystem implements AdapterInterface
     protected $visibility;
 
     /**
+     * @var  array  $plugins
+     */
+    protected $plugins = array();
+
+    /**
      * Constructor
      *
      * @param AdapterInterface $adapter
      * @param CacheInterface   $cache
+     * @param string           $visibility
      */
     public function __construct(AdapterInterface $adapter, CacheInterface $cache = null, $visibility = AdapterInterface::VISIBILITY_PUBLIC)
     {
@@ -56,22 +63,28 @@ class Filesystem implements AdapterInterface
     }
 
     /**
-     * Check wether a path exists
+     * Check whether a path exists
      *
      * @param  string  $path path to check
-     * @return boolean wether the path exists
+     * @return boolean whether the path exists
      */
     public function has($path)
     {
-        if ($this->cache->has($path)) {
-            return true;
+        $path = Util::normalizePath($path);
+
+        if (($exists = $this->cache->has($path)) !== null) {
+            return $exists;
         }
 
-        if ($this->cache->isComplete() or ($data = $this->adapter->has($path)) === false) {
+        $result = $this->adapter->has($path);
+
+        if ( ! $result) {
+            $this->cache->storeMiss($path);
+
             return false;
         }
 
-        $this->cache->updateObject($path, $data === true ? array() : $data, true);
+        $this->cache->updateObject($path, $result === true ? array() : $result, true);
 
         return true;
     }
@@ -81,19 +94,125 @@ class Filesystem implements AdapterInterface
      *
      * @param  string              $path     path to file
      * @param  string              $contents file contents
+     * @param  string              $visibility
      * @throws FileExistsException
      * @return boolean             success boolean
      */
     public function write($path, $contents, $visibility = null)
     {
+        $path = Util::normalizePath($path);
         $this->assertAbsent($path);
 
-        if ( ! $data = $this->adapter->write($path, $contents, $visibility ?: $this->visibility)) {
+        if ( ! $object = $this->adapter->write($path, $contents, $visibility ?: $this->visibility)) {
             return false;
         }
 
-        $this->cache->updateObject($path, $data, true);
+        $this->cache->updateObject($path, $object, true);
         $this->cache->ensureParentDirectories($path);
+
+        return true;
+    }
+
+    public function writeStream($path, $resource, $visibility = null)
+    {
+        $path = Util::normalizePath($path);
+        $this->assertAbsent($path);
+
+        if ( ! is_resource($resource)) {
+            throw new InvalidArgumentException(__METHOD__.' expects argument #2 to be a valid resource.');
+        }
+
+        if ( ! $object = $this->adapter->writeStream($path, $resource, $visibility ?: $this->visibility)) {
+            return false;
+        }
+
+        $this->cache->updateObject($path, $object, true);
+        $this->cache->ensureParentDirectories($path);
+
+        return true;
+    }
+
+    /**
+     * Update a file with the contents of a stream
+     *
+     * @param   string    $path
+     * @param   resource  $resource
+     * @return  bool      success boolean
+     * @throws  InvalidArgumentException
+     */
+    public function updateStream($path, $resource)
+    {
+        $path = Util::normalizePath($path);
+        $this->assertPresent($path);
+
+        if ( ! is_resource($resource)) {
+            throw new InvalidArgumentException(__METHOD__.' expects argument #2 to be a valid resource.');
+        }
+
+        if ( ! $object = $this->adapter->updateStream($path, $resource)) {
+            return false;
+        }
+
+        $this->cache->updateObject($path, $object, true);
+        $this->cache->ensureParentDirectories($path);
+
+        return true;
+    }
+
+    /**
+     * Create a file or update if exists using a stream
+     *
+     * @param   string    $path
+     * @param   resource  $resource
+     * @param   string    $visibility
+     * @return  boolean   success boolean
+     */
+    public function putStream($path, $resource, $visibility = null)
+    {
+        $path = Util::normalizePath($path);
+
+        if ($this->has($path)) {
+            return $this->updateStream($path, $resource);
+        }
+
+        return $this->writeStream($path, $resource, $visibility);
+    }
+
+    /**
+     * Retrieves a read-stream for a path
+     *
+     * @param   string  $path
+     * @return  resource|false  path resource or false when on failure
+     */
+    public function readStream($path)
+    {
+        $path = Util::normalizePath($path);
+        $this->assertPresent($path);
+
+        if ( ! $object = $this->adapter->readStream($path)) {
+            return false;
+        }
+
+        return $object['stream'];
+    }
+
+    /**
+     * Create a file or update if exists
+     *
+     * @param  string              $path     path to file
+     * @param  string              $contents file contents
+     * @param  string              $visibility
+     * @throws FileExistsException
+     * @return boolean             success boolean
+     */
+    public function put($path, $contents, $visibility = null)
+    {
+        $path = Util::normalizePath($path);
+        if ($this->has($path)) {
+            return $this->update($path, $contents);
+        }
+
+        return $this->write($path, $contents, $visibility);
 
         return true;
     }
@@ -108,20 +227,21 @@ class Filesystem implements AdapterInterface
      */
     public function update($path, $contents)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
-        $data = $this->adapter->update($path, $contents);
+        $object = $this->adapter->update($path, $contents);
 
-        if ($data === false) {
+        if ($object === false) {
             return false;
         }
 
-        $this->cache->updateObject($path, $data, true);
+        $this->cache->updateObject($path, $object, true);
 
         return true;
     }
 
     /**
-     * Write a file
+     * Read a file
      *
      * @param  string                $path path to file
      * @throws FileNotFoundException
@@ -129,23 +249,24 @@ class Filesystem implements AdapterInterface
      */
     public function read($path)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
 
         if ($contents = $this->cache->read($path)) {
             return $contents;
         }
 
-        if ( ! $data = $this->adapter->read($path)) {
+        if ( ! $object = $this->adapter->read($path)) {
             return false;
         }
 
-        $this->cache->updateObject($path, $data, true);
+        $this->cache->updateObject($path, $object, true);
 
-        return $data['contents'];
+        return $object['contents'];
     }
 
     /**
-     * Write a file
+     * Rename a file
      *
      * @param  string                $path    path to file
      * @param  string                $newpath new path
@@ -155,6 +276,8 @@ class Filesystem implements AdapterInterface
      */
     public function rename($path, $newpath)
     {
+        $path = Util::normalizePath($path);
+        $newpath = Util::normalizePath($newpath);
         $this->assertPresent($path);
         $this->assertAbsent($newpath);
 
@@ -176,6 +299,7 @@ class Filesystem implements AdapterInterface
      */
     public function delete($path)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
 
         if ($this->adapter->delete($path) === false) {
@@ -190,11 +314,12 @@ class Filesystem implements AdapterInterface
     /**
      * Delete a directory
      *
-     * @param  string  $path path to directory
+     * @param  string  $dirname path to directory
      * @return boolean success boolean
      */
     public function deleteDir($dirname)
     {
+        $dirname = Util::normalizePath($dirname);
         if ($this->adapter->deleteDir($dirname) === false) {
             return false;
         }
@@ -212,25 +337,29 @@ class Filesystem implements AdapterInterface
      */
     public function createDir($dirname)
     {
-        $data = $this->adapter->createDir($dirname);
+        $dirname = Util::normalizePath($dirname);
+        $object = $this->adapter->createDir($dirname);
 
-        $this->cache->updateObject($dirname, $data, true);
+        $this->cache->updateObject($dirname, $object, true);
     }
 
     /**
      * List the filesystem contents
      *
-     * @return array contents
+     * @param  string   $directory
+     * @param  boolean  $recursive
+     * @return array    contents
      */
-    public function listContents()
+    public function listContents($directory = '', $recursive = false)
     {
-        if ($this->cache->isComplete()) {
-            return $this->cache->listContents();
+        $directory = Util::normalizePath($directory);
+        if ($this->cache->isComplete($directory, $recursive)) {
+            return $this->cache->listContents($directory, $recursive);
         }
 
-        $contents = $this->adapter->listContents();
+        $contents = $this->adapter->listContents($directory, $recursive);
 
-        return $this->cache->storeContents($contents);
+        return $this->cache->storeContents($directory, $contents, $recursive);
     }
 
     /**
@@ -238,10 +367,10 @@ class Filesystem implements AdapterInterface
      *
      * @return  array  paths
      */
-    public function listPaths()
+    public function listPaths($directory = '', $recursive = false)
     {
         $result = array();
-        $contents = $this->listContents();
+        $contents = $this->listContents($directory, $recursive);
 
         foreach ($contents as $object) {
             $result[] = $object['path'];
@@ -253,13 +382,12 @@ class Filesystem implements AdapterInterface
     /**
      * List contents with metadata
      *
-     * @param   ...string|array  $key  metadata key
+     * @param   array  $key  metadata key
      * @return  array            listing with metadata
      */
-    public function listWith($key)
+    public function listWith(array $keys = array(), $directory = '', $recursive = false)
     {
-        $keys = is_array($key) ? $key : func_get_args();
-        $contents = $this->listContents();
+        $contents = $this->listContents($directory, $recursive);
 
         foreach ($contents as $index => $object) {
             if ($object['type'] === 'file') {
@@ -275,6 +403,7 @@ class Filesystem implements AdapterInterface
      *
      * @param   string  $path      path to file
      * @param   array   $metadata  metadata keys
+     * @throws InvalidArgumentException
      * @return  array   metadata
      */
     public function getWithMetadata($path, array $metadata)
@@ -301,19 +430,20 @@ class Filesystem implements AdapterInterface
      */
     public function getMimetype($path)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
 
         if ($mimetype = $this->cache->getMimetype($path)) {
             return $mimetype;
         }
 
-        if ( ! $data = $this->adapter->getMimetype($path)) {
+        if ( ! $object = $this->adapter->getMimetype($path)) {
             return false;
         }
 
-        $data = $this->cache->updateObject($path, $data, true);
+        $object = $this->cache->updateObject($path, $object, true);
 
-        return $data['mimetype'];
+        return $object['mimetype'];
     }
 
      /**
@@ -325,19 +455,20 @@ class Filesystem implements AdapterInterface
      */
     public function getTimestamp($path)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
 
         if ($mimetype = $this->cache->getTimestamp($path)) {
             return $mimetype;
         }
 
-        if ( ! $data = $this->adapter->getTimestamp($path)) {
+        if ( ! $object = $this->adapter->getTimestamp($path)) {
             return false;
         }
 
-        $data = $this->cache->updateObject($path, $data, true);
+        $object = $this->cache->updateObject($path, $object, true);
 
-        return $data['timestamp'];
+        return $object['timestamp'];
     }
 
     /**
@@ -348,19 +479,20 @@ class Filesystem implements AdapterInterface
      */
     public function getVisibility($path)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
 
         if ($visibility = $this->cache->getVisibility($path)) {
             return $visibility;
         }
 
-        if (($data = $this->adapter->getVisibility($path)) === false) {
+        if (($object = $this->adapter->getVisibility($path)) === false) {
             return false;
         }
 
-        $this->cache->updateObject($path, $data, true);
+        $this->cache->updateObject($path, $object, true);
 
-        return $data['visibility'];
+        return $object['visibility'];
     }
 
     /**
@@ -371,17 +503,18 @@ class Filesystem implements AdapterInterface
      */
     public function getSize($path)
     {
+        $path = Util::normalizePath($path);
         if ($visibility = $this->cache->getSize($path)) {
             return $visibility;
         }
 
-        if (($data = $this->adapter->getSize($path)) === false) {
+        if (($object = $this->adapter->getSize($path)) === false) {
             return false;
         }
 
-        $this->cache->updateObject($path, $data, true);
+        $this->cache->updateObject($path, $object, true);
 
-        return $data['size'];
+        return $object['size'];
     }
 
     /**
@@ -393,13 +526,14 @@ class Filesystem implements AdapterInterface
      */
     public function setVisibility($path, $visibility)
     {
-        if ( ! $data = $this->adapter->setVisibility($path, $visibility)) {
+        $path = Util::normalizePath($path);
+        if ( ! $object = $this->adapter->setVisibility($path, $visibility)) {
             return false;
         }
 
-        $this->cache->updateObject($path, $data, true);
+        $this->cache->updateObject($path, $object, true);
 
-        return $data['visibility'];
+        return $object['visibility'];
     }
 
     /**
@@ -411,6 +545,7 @@ class Filesystem implements AdapterInterface
      */
     public function getMetadata($path)
     {
+        $path = Util::normalizePath($path);
         $this->assertPresent($path);
 
         if ($metadata = $this->cache->getMetadata($path)) {
@@ -428,10 +563,13 @@ class Filesystem implements AdapterInterface
      * Get a file/directory handler
      *
      * @param   string   $path
+     * @param   Handler  $handler
      * @return  Handler  file or directory handler
      */
     public function get($path, Handler $handler = null)
     {
+        $path = Util::normalizePath($path);
+
         if ( ! $handler) {
             $metadata = $this->getMetadata($path);
 
@@ -462,7 +600,7 @@ class Filesystem implements AdapterInterface
      * @param  string                $path path to file
      * @throws FileNotFoundException
      */
-    protected function assertPresent($path)
+    public function assertPresent($path)
     {
         if ( ! $this->has($path)) {
             throw new FileNotFoundException($path);
@@ -475,10 +613,57 @@ class Filesystem implements AdapterInterface
      * @param  string              $path path to file
      * @throws FileExistsException
      */
-    protected function assertAbsent($path)
+    public function assertAbsent($path)
     {
         if ($this->has($path)) {
             throw new FileExistsException($path);
         }
+    }
+
+    /**
+     * Register a plugin
+     *
+     * @param   PluginInterface  $plugin
+     * @return  $this
+     */
+    public function addPlugin(PluginInterface $plugin)
+    {
+        $plugin->setFilesystem($this);
+        $method = $plugin->getMethod();
+
+        $this->plugins[$method] = $plugin;
+
+        return $this;
+    }
+
+    /**
+     * Register a plugin
+     *
+     * @param   string           $method
+     * @return  PluginInterface  $plugin
+     * @throws  LogicException
+     */
+    protected function findPlugin($method)
+    {
+        if ( ! isset($this->plugins[$method])) {
+            throw new LogicException('Plugin not found for method: '.$method);
+        }
+
+        return $this->plugins[$method];
+    }
+
+    /**
+     * Plugins passthrough
+     *
+     * @param   string  $method
+     * @param   array   $arguments
+     * @return  mixed
+     */
+    public function __call($method, array $arguments)
+    {
+        $plugin = $this->findPlugin($method);
+        $callback = array($plugin, 'handle');
+
+        return call_user_func_array($callback, $arguments);
     }
 }

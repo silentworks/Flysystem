@@ -4,112 +4,75 @@ namespace Flysystem\Adapter;
 
 use Flysystem\AdapterInterface;
 use Flysystem\Util;
+use RuntimeException;
 
-class Ftp extends AbstractAdapter
+class Ftp extends AbstractFtpAdapter
 {
-    protected $connection;
-    protected $host;
-    protected $port;
-    protected $username;
-    protected $password;
-    protected $ssl = false;
-    protected $timeout = 90;
-    protected $passive = true;
-    protected $separator = '/';
-    protected $root;
+    protected $configurable = array('host', 'port', 'username', 'password', 'ssl', 'timeout', 'root', 'permPrivate', 'permPublic', 'passive');
 
-    public function __construct(array $config)
+    /**
+     * Returns if SSL is enabled
+     *
+     * @return bool
+     */
+    public function getSsl()
     {
-        $this->setConfig($config);
+        return $this->ssl;
     }
 
-    public function setConfig(array $config)
-    {
-        $settings = array('host', 'port', 'username', 'password', 'ssl', 'timeout', 'root');
-
-        foreach ($settings as $setting) {
-            if ( ! isset($config[$setting])) continue;
-
-            $this->{'set'.ucfirst($setting)}($config[$setting]);
-        }
-    }
-
-    public function setHost($host)
-    {
-        $this->host = $host;
-
-        return $this;
-    }
-
-    public function setPort($port)
-    {
-        $this->port = $port;
-
-        return $this;
-    }
-
-    public function getPort()
-    {
-        if ($this->port !== null) {
-            return $this->port;
-        }
-
-        return 21;
-    }
-
-    public function setUsername($username)
-    {
-        $this->username = $username;
-
-        return $this;
-    }
-
-    public function setPassword($password)
-    {
-        $this->password = $password;
-
-        return $this;
-    }
-
+    /**
+     * Set if Ssl is enabled
+     *
+     * @param bool $ssl
+     * @return \Flysystem\Adapter\Ftp
+     */
     public function setSsl($ssl)
     {
-        $this->ssl = $ssl;
+        $this->ssl = (bool) $ssl;
 
         return $this;
     }
 
-    public function setTimeout($timeout)
+    /**
+     * Returns if passive mode will be used
+     *
+     * @return bool
+     */
+    public function getPassive()
     {
-        $this->timeout = $timeout;
-
-        return $this;
+        return $this->passive;
     }
 
+    /**
+     * Set if passive mode should be used
+     *
+     * @param bool $passive
+     */
     public function setPassive($passive = true)
     {
         $this->passive = $passive;
     }
 
-    public function setRoot($root)
+    /**
+     * Returns the root folder to work from
+     *
+     * @return string
+     */
+    public function getRoot()
     {
-        $this->root = $root;
-    }
-
-    public function getConnection()
-    {
-        if ( ! $this->connection) {
-            $this->connect();
-        }
-
-        return $this->connection;
+        return $this->root;
     }
 
     public function connect()
     {
-        $connector = $this->ssl ? 'ftp_ssl_connect' : 'ftp_connect';
+        if ($this->ssl) {
+            $this->connection = ftp_ssl_connect($this->getHost(), $this->getPort(), $this->getTimeout());
+        } else {
+            $this->connection = ftp_connect($this->getHost(), $this->getPort(), $this->getTimeout());
+        }
 
-        if ( ! $this->connection = @$connector($this->host, $this->getPort(), $this->timeout)) {
-            throw new \RuntimeException('Could not connect to host: '.$this->host.'::'.$this->getPort());
+        if ( ! $this->connection) {
+            throw new RuntimeException('Could not connect to host: ' . $this->getHost() . ', port:' . $this->getPort());
         }
 
         $this->login();
@@ -119,22 +82,22 @@ class Ftp extends AbstractAdapter
 
     protected function setConnectionPassiveMode()
     {
-        if ( ! $result = ftp_pasv($this->connection, $this->passive)) {
-            throw new \RuntimeException('Could not set passive mode for connection: '.$this->host.'::'.$this->getPort());
+        if ( ! $result = ftp_pasv($this->getConnection(), $this->getPassive())) {
+            throw new RuntimeException('Could not set passive mode for connection: ' . $this->getHost() . '::' . $this->getPort());
         }
     }
 
     protected function setConnectionRoot()
     {
-        if ($this->root and ! ftp_chdir($this->connection, $this->root)) {
-            throw new \RuntimeException('Root is invalid or does not exist: '.$this->root);
+        if ($this->root and ! ftp_chdir($this->getConnection(), $this->getRoot())) {
+            throw new RuntimeException('Root is invalid or does not exist: ' . $this->getRoot());
         }
     }
 
     protected function login()
     {
-        if ( ! @ftp_login($this->connection, $this->username, $this->password)) {
-            throw new \RuntimeException('Could not login with connection: '.$this->host.'::'.$this->getPort().', username: '.$this->username);
+        if ( ! @ftp_login($this->getConnection(), $this->getUsername(), $this->getPassword())) {
+            throw new RuntimeException('Could not login with connection: ' . $this->getHost() . '::' . $this->getPort() . ', username: ' . $this->getUsername());
         }
     }
 
@@ -151,8 +114,13 @@ class Ftp extends AbstractAdapter
     {
         $this->ensureDirectory(Util::dirname($path));
         $mimetype = Util::contentMimetype($contents);
-        $stream = fopen('data://'.$mimetype.','.$contents, 'r');
-        $result = ftp_fput($this->connection, $path, $stream, FTP_BINARY);
+        $stream = $contents;
+
+        if ( ! is_resource($stream)) {
+            $stream = fopen('data://' . $mimetype . ',' . $contents, 'r+');
+        }
+
+        $result = ftp_fput($this->getConnection(), $path, $stream, FTP_BINARY);
         fclose($stream);
 
         if ( ! $result) {
@@ -173,12 +141,12 @@ class Ftp extends AbstractAdapter
 
     public function rename($path, $newpath)
     {
-        return ftp_rename($this->connection, $path, $newpath);
+        return ftp_rename($this->getConnection(), $path, $newpath);
     }
 
     public function delete($path)
     {
-        return ftp_delete($this->connection, $path);
+        return ftp_delete($this->getConnection(), $path);
     }
 
     public function deleteDir($dirname)
@@ -187,56 +155,33 @@ class Ftp extends AbstractAdapter
 
         foreach ($contents as $object) {
             if ($object['type'] === 'file') {
-                ftp_delete($this->connection, $dirname.$this->separator.$object['path']);
+                ftp_delete($this->getConnection(), $dirname . $this->separator . $object['path']);
             } else {
-                ftp_rmdir($this->connection, $dirname.$this->separator.$object['path']);
+                ftp_rmdir($this->getConnection(), $dirname . $this->separator . $object['path']);
             }
         }
 
-        ftp_rmdir($this->connection, $dirname);
+        ftp_rmdir($this->getConnection(), $dirname);
     }
 
     public function createDir($dirname)
     {
-        if ( ! ftp_mkdir($this->connection, $dirname)) {
+        if ( ! ftp_mkdir($this->getConnection(), $dirname)) {
             return false;
         }
 
         return array('path' => $dirname);
     }
 
-    public function ensureDirectory($dirname)
-    {
-        if ( ! $this->has($dirname)) {
-            $this->createDir($dirname);
-        }
-    }
-
-    public function has($path)
-    {
-        return $this->getMetadata($path);
-    }
-
     public function getMetadata($path)
     {
-        if ( ! $object = ftp_raw($this->connection, 'STAT '.$path) or count($object) < 3) {
+        if ( ! $object = ftp_raw($this->getConnection(), 'STAT ' . $path) or count($object) < 3) {
             return false;
         }
 
-        $dirname = dirname($path);
-        if ($dirname === '.') $dirname = '';
+        $dirname = Util::dirname($path);
 
-        return $this->normalizeObject($object[1], $dirname);
-    }
-
-    public function getSize($path)
-    {
-        return $this->getMetadata($path);
-    }
-
-    public function getTimestamp($path)
-    {
-        return $this->getMetadata($path);
+        return $this->normalizeObject($object[1], '');
     }
 
     public function getMimetype($path)
@@ -252,135 +197,45 @@ class Ftp extends AbstractAdapter
 
     public function read($path)
     {
+        if ( ! $object = $this->readStream($path)) {
+            return false;
+        }
+
+        $object['contents'] = stream_get_contents($object['stream']);
+        fclose($object['stream']);
+        unset($object['stream']);
+
+        return $object;
+    }
+
+    public function readStream($path)
+    {
         $stream = fopen('php://temp', 'w+');
-        $result = ftp_fget($this->connection, $stream, $path, FTP_BINARY);
+        $result = ftp_fget($this->getConnection(), $stream, $path, FTP_BINARY);
 
         if ( ! $result) {
             fclose($stream);
             return false;
         }
 
-        rewind($stream);
-        $contents = stream_get_contents($stream);
-        fclose($stream);
-
-        return compact('contents');
+        return compact('stream');
     }
 
     public function setVisibility($path, $visibility)
     {
-        $mode = $visibility === AdapterInterface::VISIBILITY_PUBLIC ? 0644 : 0000;
+        $mode = $visibility === AdapterInterface::VISIBILITY_PUBLIC ? $this->getPermPublic() : $this->getPermPrivate();
 
-        if ( ! ftp_chmod($this->connection, $mode, $path)) {
+        if ( ! ftp_chmod($this->getConnection(), $mode, $path)) {
             return false;
         }
 
         return compact('visibility');
     }
 
-    public function getVisibility($path)
+    protected function listDirectoryContents($directory, $recursive = true)
     {
-        throw new \Exception('not implemented');
-    }
+        $listing = ftp_rawlist($this->getConnection(), $directory, $recursive);
 
-    public function listContents()
-    {
-        return $this->listDirectoryContents('./');
-    }
-
-    protected function listDirectoryContents($directory)
-    {
-        $listing = ftp_rawlist($this->connection, $directory, true);
-
-        return $this->normalizeListing($listing);
-    }
-
-    protected function normalizeListing(array $listing)
-    {
-        $listing = $this->removeDotDirectories($listing);
-
-        $base = '';
-        $result = array();
-
-        while ($item = array_shift($listing))
-        {
-            if (preg_match('#\./.*:#', $item)) {
-                $base = substr($item, 2, -1);
-                continue;
-            }
-
-            $result[] = $this->normalizeObject($item, $base);
-        }
-
-        return $this->sortListing($result);
-    }
-
-    protected function sortListing(array $result)
-    {
-        $compare = function ($one, $two) {
-            return strnatcmp($one['path'], $two['path']);
-        };
-
-        usort($result, $compare);
-
-        return $result;
-    }
-
-    protected function normalizeObject($item, $base)
-    {
-        $item = preg_replace('#\s+#', ' ', trim($item));
-        list ($permissions, $number, $owner, $group, $size, $month, $day, $time, $name) = explode(' ', $item, 9);
-
-        $type = $this->detectType($permissions);
-        $path = empty($base) ? $name : $base.$this->separator.$name;
-
-        if ($type === 'dir') {
-            return compact('type', 'path');
-        }
-
-        $permissions = $this->normalizePermissions($permissions);
-        $visibility = $permissions & 0044 ? AdapterInterface::VISIBILITY_PUBLIC : AdapterInterface::VISIBILITY_PRIVATE;
-        $size = (int) $size;
-        $timestamp = strtotime($month.' '.$day.' '.$time);
-
-        return compact('type', 'path', 'visibility', 'size', 'timestamp');
-    }
-
-    protected function detectType($permissions)
-    {
-        return substr($permissions, 0, 1) === 'd' ? 'dir' : 'file';
-    }
-
-    protected function normalizePermissions($permissions)
-    {
-        // remove the type identifier
-        $permissions = substr($permissions, 1);
-
-        // map the string rights to the numeric counterparts
-        $map = array('-' => '0', 'r' => '4', 'w' => '2', 'x' => '1');
-        $permissions = strtr($permissions, $map);
-
-        // split up the permission groups
-        $parts = str_split($permissions, 3);
-
-        // convert the groups
-        $mapper = function ($part) { return array_sum(str_split($part)); };
-
-        // get the sum of the groups
-        return array_sum(array_map($mapper, $parts));
-    }
-
-    protected function removeDotDirectories(array $list)
-    {
-        $filter = function ($line) {
-            return ! empty($line) and ! preg_match('#.* \.(\.)?$#', $line);
-        };
-
-        return array_filter($list, $filter);
-    }
-
-    public function __destruct()
-    {
-        $this->disconnect();
+        return $this->normalizeListing($listing, $directory);
     }
 }

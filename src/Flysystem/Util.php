@@ -62,7 +62,7 @@ abstract class Util
      * @param   string  $separator
      * @return  string  normalized path
      */
-    public static function normalizePath($path, $separator)
+    public static function normalizePath($path, $separator = '\\/')
     {
         return ltrim($path, $separator);
     }
@@ -104,7 +104,7 @@ abstract class Util
     }
 
     /**
-     * Emulate directies
+     * Emulate directories
      *
      * @param   array  $listing
      * @return  array  listing with emulated directories

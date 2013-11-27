@@ -5,6 +5,7 @@ namespace Flysystem\Adapter;
 use Finfo;
 use SplFileInfo;
 use FilesystemIterator;
+use DirectoryIterator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use Flysystem\Util;
@@ -24,9 +25,24 @@ class Local extends AbstractAdapter
      */
     public function __construct($root)
     {
-        $root = realpath($root);
+        $root = $this->ensureRootDirectory($root);
 
         $this->root = Util::normalizePrefix($root, DIRECTORY_SEPARATOR);
+    }
+
+    /**
+     * Ensure the root directory exists.
+     *
+     * @param   string  $root  root directory path
+     * @return  string  real path to root
+     */
+    protected function ensureRootDirectory($root)
+    {
+        if ( ! is_dir($root)) {
+            mkdir($root, 0777, true);
+        }
+
+        return realpath($root);
     }
 
     /**
@@ -37,11 +53,15 @@ class Local extends AbstractAdapter
      */
     protected function prefix($path)
     {
+        if (empty($path)) {
+            return $this->root;
+        }
+
         return $this->root.Util::normalizePath($path, DIRECTORY_SEPARATOR);
     }
 
     /**
-     * Check wether a file is present
+     * Check whether a file is present
      *
      * @param   string   $path
      * @return  boolean
@@ -51,7 +71,7 @@ class Local extends AbstractAdapter
         return file_exists($this->prefix($path));
     }
 
-    public function write($path, $contents, $visibility)
+    public function write($path, $contents, $visibility = null)
     {
         $location = $this->prefix($path);
 
@@ -63,7 +83,8 @@ class Local extends AbstractAdapter
             return false;
         }
 
-        $this->setVisibility($path, $visibility);
+        if ($visibility)
+            $this->setVisibility($path, $visibility);
 
         return array(
             'contents' => $contents,
@@ -72,6 +93,39 @@ class Local extends AbstractAdapter
             'visibility' => $visibility,
             'mimetype' => Util::contentMimetype($contents),
         );
+    }
+
+    public function writeStream($path, $resource, $visibility = null)
+    {
+        rewind($resource);
+
+        if ( ! $stream = fopen($this->prefix($path), 'w+')) {
+            return false;
+        }
+
+        while ( ! feof($resource)) {
+            fwrite($stream, fread($resource, 1024), 1024);
+        }
+
+        if ( ! fclose($stream)) {
+            return false;
+        }
+
+        $visibility and $this->setVisibility($path, $visibility);
+
+        return compact('path', 'visibility');
+    }
+
+    public function readStream($path)
+    {
+        $stream = fopen($this->prefix($path), 'r+');
+
+        return compact('stream', 'path');
+    }
+
+    public function updateStream($path, $resource)
+    {
+        return $this->writeStream($path, $resource);
     }
 
     public function update($path, $contents)
@@ -111,9 +165,9 @@ class Local extends AbstractAdapter
         return unlink($this->prefix($path));
     }
 
-    public function listContents()
+    public function listContents($directory = '', $recursive = false)
     {
-        return $this->directoryContents('', true);
+        return $this->directoryContents($directory, $recursive);
     }
 
     public function getMetadata($path)
@@ -184,25 +238,27 @@ class Local extends AbstractAdapter
 
         foreach ($contents as $file) {
             if ($file['type'] === 'file') {
-                unlink($location.DIRECTORY_SEPARATOR.$file['path']);
+                unlink($this->prefix($file['path']));
             } else {
-                rmdir($location.DIRECTORY_SEPARATOR.$file['path']);
+                rmdir($this->prefix($file['path']));
             }
         }
 
         return rmdir($location);
     }
 
-    protected function directoryContents($path = '', $info = true)
+    protected function directoryContents($path = '', $recursive = false)
     {
         $result = array();
-        $path = $this->prefix($path).DIRECTORY_SEPARATOR;
-        $length = strlen($path);
-        $iterator = $this->getDirectoryIterator($path);
+        $location = $this->prefix($path).DIRECTORY_SEPARATOR;
+        $length = strlen($this->root);
+        $iterator = $recursive ? $this->getRecursiveDirectoryIterator($location) : $this->getDirectoryIterator($location);
 
         foreach ($iterator as $file) {
             $path = substr($file->getPathname(), $length);
-            $result[] = $info ? $this->normalizeFileInfo($path, $file) : $path;
+            $path = trim($path, '\\/');
+            if (preg_match('#(^|/)\.{1,2}$#', $path)) continue;
+            $result[] = $this->normalizeFileInfo($path, $file);
         }
 
         return $result;
@@ -220,10 +276,17 @@ class Local extends AbstractAdapter
         return $normalized;
     }
 
-    protected function getDirectoryIterator($path)
+    protected function getRecursiveDirectoryIterator($path)
     {
         $directory = new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS);
         $iterator = new RecursiveIteratorIterator($directory, RecursiveIteratorIterator::SELF_FIRST);
+
+        return $iterator;
+    }
+
+    protected function getDirectoryIterator($path)
+    {
+        $iterator = new DirectoryIterator($path);
 
         return $iterator;
     }
